@@ -1,0 +1,68 @@
+name: Diagnose macOS Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  diagnose:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - name: Download published Apple Silicon archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download v0.3.1 --repo kayinkr/imdev \
+            --pattern Imdev-0.3.1-macOS-arm64.zip --dir "$RUNNER_TEMP/imdev-diagnosis"
+      - name: Inspect original and locally ad-hoc-signed bundles
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib
+          import json
+          import os
+          from pathlib import Path
+          import shutil
+          import subprocess
+
+          root = Path(os.environ['RUNNER_TEMP']) / 'imdev-diagnosis'
+          archive = root / 'Imdev-0.3.1-macOS-arm64.zip'
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          assert digest == 'ddb6b3ccf6b1da1e7549ce0e2889a58e5fffe36935eb5d4ae2e4498296841bce', digest
+          original = root / 'original'
+          original.mkdir()
+          subprocess.run(['ditto', '-x', '-k', str(archive), str(original)], check=True)
+          report = {}
+          def probe(label, command):
+              result = subprocess.run(command, text=True, stdout=subprocess.PIPE,
+                                      stderr=subprocess.STDOUT, timeout=90)
+              print('\n###', label, '\ncommand:', command,
+                    '\nreturncode:', result.returncode, '\n', result.stdout, flush=True)
+              report[label] = {'command': command, 'returncode': result.returncode,
+                               'output': result.stdout}
+              return result
+
+          app = original / 'Imdev.app'
+          binary = app / 'Contents/MacOS/imdev'
+          probe('macOS version', ['sw_vers'])
+          probe('original binary signature', ['codesign', '-d', '--verbose=4', str(binary)])
+          probe('original binary verification', ['codesign', '--verify', '--strict', '--verbose=4', str(binary)])
+          probe('original app signature', ['codesign', '-d', '--verbose=4', str(app)])
+          probe('original app verification', ['codesign', '--verify', '--deep', '--strict', '--verbose=4', str(app)])
+          probe('original Gatekeeper assessment', ['spctl', '--assess', '--type', 'execute', '--verbose=4', str(app)])
+          probe('original app distribution policy', ['syspolicy_check', 'distribution', str(app)])
+          probe('original binary smoke test', [str(binary), '--help'])
+
+          candidate = root / 'candidate/Imdev.app'
+          candidate.parent.mkdir()
+          shutil.copytree(app, candidate)
+          probe('candidate ad-hoc signing', ['codesign', '--force', '--sign', '-', '--timestamp=none', str(candidate)])
+          probe('candidate app verification', ['codesign', '--verify', '--deep', '--strict', '--verbose=4', str(candidate)])
+          probe('candidate Gatekeeper assessment', ['spctl', '--assess', '--type', 'execute', '--verbose=4', str(candidate)])
+          probe('candidate app distribution policy', ['syspolicy_check', 'distribution', str(candidate)])
+          (root / 'diagnosis.json').write_text(json.dumps(report, indent=2))
+          print('\nDiagnostic probes complete. Ad-hoc signature validity is not Developer ID trust or notarization.')
+          PY
