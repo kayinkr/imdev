@@ -1,0 +1,139 @@
+name: macOS build
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'src/**'
+      - 'tests/**'
+      - 'assets/**'
+      - 'tools/package.py'
+      - '.github/workflows/macos-build.yml'
+  pull_request:
+    branches: [main]
+    paths:
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'rust-toolchain.toml'
+      - 'src/**'
+      - 'tests/**'
+      - 'assets/**'
+      - 'tools/package.py'
+      - '.github/workflows/macos-build.yml'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-build-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: macOS ${{ matrix.arch }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            arch: arm64
+            target: aarch64-apple-darwin
+          - runner: macos-15-intel
+            arch: x86_64
+            target: x86_64-apple-darwin
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    env:
+      CARGO_TERM_COLOR: always
+      RUST_BACKTRACE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          persist-credentials: false
+      - name: Select Python
+        run: |
+          python3 --version
+          python3 -c 'import tomllib'
+          python3 -m venv "$RUNNER_TEMP/imdev-python"
+          echo "$RUNNER_TEMP/imdev-python/bin" >> "$GITHUB_PATH"
+      - name: Select Rust toolchain and verify host
+        run: |
+          rustup show active-toolchain
+          rustc -vV
+          cargo --version
+          rustc -vV | sed -n 's/^host: //p' | tr -d '\r' | \
+            xargs -I '{}' test '{}' = '${{ matrix.target }}'
+          test "$(uname -m)" = '${{ matrix.arch }}'
+      - name: Install Python test dependency
+        run: python -m pip install 'Pillow==12.0.0'
+      - name: Test Python tools
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
+      - name: Test Rust application
+        run: cargo test --locked
+      - name: Build native release
+        run: cargo build --release --locked
+      - name: Smoke-test release without a window
+        run: |
+          target/release/imdev --help
+          target/release/imdev --headless-ui-check
+          file target/release/imdev
+          otool -L target/release/imdev
+      - name: Package unsigned application
+        run: python tools/package.py
+      - name: Verify packaged application
+        run: |
+          python - <<'PY'
+          import hashlib
+          import json
+          from pathlib import Path
+          import plistlib
+          import stat
+          import subprocess
+          import tempfile
+          import tomllib
+          import zipfile
+
+          version = tomllib.loads(Path('Cargo.toml').read_text())['package']['version']
+          manifest = json.loads(Path('dist/manifest.json').read_text())
+          for item in manifest:
+              path = Path('dist') / item['file']
+              assert path.stat().st_size == item['bytes']
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == item['sha256']
+          archives = list(Path('dist').glob('Imdev-*-macOS-*.zip'))
+          assert len(archives) == 1, archives
+          with zipfile.ZipFile(archives[0]) as archive:
+              assert archive.testzip() is None
+              info = plistlib.loads(archive.read('Imdev.app/Contents/Info.plist'))
+              assert info['CFBundleShortVersionString'] == version
+              assert info['CFBundleExecutable'] == 'imdev'
+              assert archive.read('OFL-NotoSansKR.txt') == Path('assets/OFL-NotoSansKR.txt').read_bytes()
+              executable = archive.getinfo('Imdev.app/Contents/MacOS/imdev')
+              mode = executable.external_attr >> 16
+              assert stat.S_ISREG(mode) and mode & stat.S_IXUSR
+              with tempfile.TemporaryDirectory() as directory:
+                  binary = Path(directory) / 'imdev'
+                  binary.write_bytes(archive.read(executable))
+                  binary.chmod(0o755)
+                  subprocess.run([str(binary), '--help'], check=True)
+                  subprocess.run([str(binary), '--headless-ui-check'], check=True)
+          print('Verified ZIP, plist version, executable permissions, font license, SHA-256 and extracted executable')
+          PY
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Imdev-macOS-${{ matrix.arch }}
+          path: |
+            dist/Imdev-*-macOS-*.zip
+            dist/Imdev-*-source.zip
+            dist/manifest.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 0

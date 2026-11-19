@@ -1,0 +1,14 @@
+/target/
+/dist/
+/releases/
+/snapshots/
+/.toolchain/
+__pycache__/
+*.py[cod]
+.DS_Store
+.env
+.env.*
+*.pem
+*.key
+state.json
+*.requests-v2.enc
