@@ -86,7 +86,7 @@ jobs:
           target/release/imdev --headless-ui-check
           file target/release/imdev
           otool -L target/release/imdev
-      - name: Package unsigned application
+      - name: Package ad-hoc-signed application (not notarized)
         run: python tools/package.py
       - name: Verify packaged application
         run: |
@@ -119,12 +119,17 @@ jobs:
               mode = executable.external_attr >> 16
               assert stat.S_ISREG(mode) and mode & stat.S_IXUSR
               with tempfile.TemporaryDirectory() as directory:
-                  binary = Path(directory) / 'imdev'
-                  binary.write_bytes(archive.read(executable))
-                  binary.chmod(0o755)
+                  subprocess.run(['ditto', '-x', '-k', str(archives[0]), directory], check=True)
+                  app = Path(directory) / 'Imdev.app'
+                  binary = app / 'Contents/MacOS/imdev'
+                  subprocess.run(['codesign', '--verify', '--deep', '--strict', '--verbose=4', str(app)], check=True)
+                  subprocess.run(['codesign', '-d', '--verbose=4', str(app)], check=True)
                   subprocess.run([str(binary), '--help'], check=True)
                   subprocess.run([str(binary), '--headless-ui-check'], check=True)
-          print('Verified ZIP, plist version, executable permissions, font license, SHA-256 and extracted executable')
+                  subprocess.run(['open', '-n', '-W', str(app), '--args', '--headless-ui-check'], check=True, timeout=60)
+                  policy = subprocess.run(['spctl', '--assess', '--type', 'execute', '--verbose=4', str(app)], capture_output=True, text=True)
+                  print('Gatekeeper assessment (ad-hoc builds are not notarized):', policy.returncode, policy.stdout, policy.stderr)
+          print('Verified ZIP, plist version, permissions, font license, SHA-256, full bundle signature and LaunchServices headless launch')
           PY
       - name: Upload build artifacts
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

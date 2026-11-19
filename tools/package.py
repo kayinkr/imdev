@@ -1,4 +1,4 @@
-"""Package only a binary built for the current host. Does not cross-compile or sign."""
+"""Package a native binary. macOS uses ad-hoc signing, not Developer ID or notarization."""
 import argparse
 from pathlib import Path
 import platform
@@ -11,6 +11,7 @@ import json
 import hashlib
 import plistlib
 import tomllib
+import subprocess
 
 root = Path(__file__).resolve().parents[1]
 p = argparse.ArgumentParser(description=__doc__)
@@ -57,6 +58,10 @@ if not args.source_only:
             (macos / 'imdev').chmod(0o755)
             info = {'CFBundleName': 'Imdev', 'CFBundleDisplayName': 'Imdev', 'CFBundleExecutable': 'imdev', 'CFBundleIdentifier': 'com.imdev.httpclient', 'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': version, 'CFBundleVersion': version, 'NSHighResolutionCapable': True}
             (bundle / 'Contents/Info.plist').write_bytes(plistlib.dumps(info))
+            # Linker signatures cover the executable, not the subsequently created
+            # app bundle. Seal the final plist and resources before archiving.
+            subprocess.run(['codesign', '--force', '--sign', '-', '--timestamp=none', str(bundle)], check=True)
+            subprocess.run(['codesign', '--verify', '--deep', '--strict', '--verbose=4', str(bundle)], check=True)
         else:
             bundle = temp / 'Imdev'
             bundle.mkdir()
